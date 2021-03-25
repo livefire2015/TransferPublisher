@@ -1,7 +1,7 @@
 import Foundation
 import Combine
 
-// MARK: Download Publisher
+// MARK: Data Download Publisher
 
 public enum DownloadOutput {
   case complete(Data)
@@ -74,7 +74,7 @@ extension URLSession {
   
 }
 
-// MARK: Upload Publisher
+// MARK: Data Upload Publisher
 
 public enum UploadOutput {
   case complete(Data?) // response body data, if any
@@ -83,7 +83,7 @@ public enum UploadOutput {
 
 extension URLSession {
   
-  // MARK: Upload Task
+  // MARK: Data Upload Task
   
   public func uploadTaskPublisher(with request: URLRequest, data: Data?) -> AnyPublisher<UploadOutput, Error> {
   
@@ -135,6 +135,72 @@ extension URLSession {
     
   }
   
+}
+
+public enum FileUploadOutput {
+    case complete(URL) // response body data, if any
+    case uploading(transferred: Int64 = 0, expected: Int64 = 0) // cumulative bytes transferred, total bytes expected
+}
+
+extension URLSession {
+
+    // MARK: File Upload Task
+
+    public func fileUploadTaskPublisher(with request: URLRequest, fromFile fileURL: URL) -> AnyPublisher<FileUploadOutput, Error> {
+
+        let subject = PassthroughSubject<FileUploadOutput, Error>()
+
+        let task = uploadTask(with: request, fromFile: fileURL) {
+            (responseData, response, error) in
+
+            guard error == nil else {
+                print("send error: upload failure")
+                subject.send(completion: .failure(error!))
+                return
+            }
+
+            guard let httpResponse = response as? HTTPURLResponse else {
+                let error = TransferError.urlError(URLError(.badServerResponse))
+                print("send error: badServerResponse")
+                subject.send(completion: .failure(error))
+                return
+            }
+
+            // should be 201, but could vary
+            guard httpResponse.statusCode >= 200 && httpResponse.statusCode < 400 else {
+                let error = TransferError.httpError(httpResponse)
+                print("send error: status code")
+                subject.send(completion: .failure(error))
+                return
+            }
+
+            print("send completion")
+            subject.send(.complete(fileURL)) // maybe don't publish at all if nil
+            subject.send(completion: .finished)
+
+        }
+
+        task.taskDescription = request.url?.absoluteString
+
+        let receivedPublisher = task.publisher(for: \.countOfBytesSent)
+            .debounce(for: .seconds(0.001), scheduler: RunLoop.current) // adjust
+
+        let expectedPublisher = task.publisher(for: \.countOfBytesExpectedToSend, options: [.initial, .new])
+
+        Publishers.CombineLatest(receivedPublisher, expectedPublisher)
+            .sink {
+                let (received, expected) = $0
+                let output = FileUploadOutput.uploading(transferred: received, expected: expected)
+                print("send output")
+                subject.send(output)
+            }.store(in: &CancellableStore.shared.cancellables)
+
+        task.resume()
+
+        return subject.eraseToAnyPublisher()
+
+    }
+
 }
 
 // MARK: Error Types
